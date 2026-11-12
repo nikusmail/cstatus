@@ -1,0 +1,33 @@
+-- cstatus cheat sheet panel for conky. Written by install-conky.sh.
+conky.config = {
+    alignment = 'top_right',
+    background = true,
+    border_inner_margin = 30,
+    border_width = 0,
+    default_color = 'white',
+    double_buffer = true,
+    draw_borders = false,
+    draw_shades = false,
+    font = 'Ubuntu Mono:size=11',
+    gap_x = @GAPX@,
+    gap_y = 40,
+    minimum_width = 600,
+    maximum_width = 600,
+    own_window = true,
+    own_window_class = 'Conky',
+    own_window_title = 'claude-board-cheat',
+    own_window_type = 'desktop',
+    own_window_argb_visual = true,
+    own_window_argb_value = 235,
+    own_window_colour = '171717',
+    own_window_transparent = false,
+    out_to_x = true,
+    text_buffer_size = 32768,
+    update_interval = 2.0,
+    use_xft = true,
+    xinerama_head = @HEAD@,
+}
+
+conky.text = [[
+${execpi 60 @BIN@ cheat}
+]]

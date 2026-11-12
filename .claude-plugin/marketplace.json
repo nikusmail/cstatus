@@ -1,0 +1,8 @@
+{
+  "name": "cstatus",
+  "owner": { "name": "nikusmail" },
+  "description": "cstatus — Claude Code task board on your desktop (conky) and in the terminal",
+  "plugins": [
+    { "name": "cstatus", "source": "./", "description": "Task board + live Claude sessions + agents on a conky panel or terminal. RU/EN." }
+  ]
+}
