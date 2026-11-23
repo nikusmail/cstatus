@@ -25,11 +25,19 @@ Percent is an honest share of the work done, not time. Note ≤ 40 chars. Write 
 
 ```bash
 cstatus task set <id> "<title ≤56>" <0-100> [run|wait|done|block] "<note>" ["<command for the user>"]
-cstatus task done <id>
+cstatus task done <id> ["<final note>"]
+cstatus task important <id> [on|off]     # ★ — first within its group
 cstatus task rm <id>
 cstatus task ls
 cstatus render --plain
 ```
+
+## Groups
+
+If the user groups tasks, put every new task in a group: `CB_GROUP=<Group> cstatus task set …` (the group sticks for later `set`
+calls without `CB_GROUP`). Move a task: `cstatus task group <id> "<Group>"` (`""` removes it). See the group order (= priority)
+with `cstatus task groups`; change it only when the user asks: `cstatus task groups "Frontend,Backend,Ops"`. Pick an existing group
+from that list or from `cstatus task ls` (4th column) rather than inventing a near-duplicate name. No groups configured — skip this.
 
 `id` — short, latin, stable for the task (`api-auth`, `release-1-2`). The same id from different sessions is one row. Check
 `cstatus task ls` before `set` to avoid duplicates.

@@ -2,14 +2,16 @@
 # cstatus — панель задач Claude Code для conky (и терминала).
 #   cstatus hook                      — обработчик хуков Claude Code (JSON на stdin), пишет состояние сессии
 #   cstatus task set ID "Заголовок" PCT [run|wait|done|block] ["заметка"]
-#   cstatus task done ID | rm ID | ls | clear-done   (6-й аргумент set — команда для владельца)
+#   cstatus task done ID ["итог"] | rm ID | ls | clear-done   (6-й аргумент set — команда для пользователя)
+#   cstatus task group ID "Группа"    — группа задачи (CB_GROUP=… при set); task groups "A,B,C" — порядок = приоритет
+#   cstatus task important ID on|off  — пометка ★
 #   cstatus mine                      — что ждёт тебя, с номерами; copy N / run N / close N
-#   cstatus render [--plain]          — вывод для conky (execpi) или терминала
+#   cstatus render [--plain|--tasks2] — вывод для conky (execpi) или терминала; --tasks2 — 2-я колонка задач
 #   cstatus cheat [--plain]           — шпаргалка команд (вторая панель conky)
 #   cstatus lang [ru|en]              — язык панели (по умолчанию из локали)
 #   cstatus gc                        — убрать старые сессии
+# Состояние: ${XDG_STATE_HOME:-~/.local/state}/claude-board/ (sessions/*.json, board.json, groups.json). Только локально, без сети.
 # https://github.com/nikusmail/cstatus · MIT
-# Состояние: ${XDG_STATE_HOME:-~/.local/state}/claude-board/ (sessions/*.json, board.json). Только локально, без сети.
 set -u
 STATE="${CLAUDE_BOARD_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/claude-board}"
 SESS="$STATE/sessions"
@@ -17,8 +19,14 @@ BOARD="$STATE/board.json"
 PROJ="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
 mkdir -p "$SESS"
 { [ -s "$BOARD" ] && jq -e 'type == "array"' "$BOARD" >/dev/null 2>&1; } || echo '[]' >"$BOARD"
+GFILE="$STATE/groups.json" # порядок групп = приоритет: ["Frontend","Backend",…]
+{ [ -s "$GFILE" ] && jq -e 'type == "array"' "$GFILE" >/dev/null 2>&1; } || echo '[]' >"$GFILE"
+# ранг группы: по порядку в groups.json; неизвестная группа — после известных; без группы — в конце
+GDEF='def grank: (.group // "") as $x | (if $x == "" then 9999 else (($G | index($x)) // 5000) end);'
+SORTK='sort_by(grank, (if .state=="wait" then 0 elif .state=="block" then 1 elif .state=="run" then 2 else 3 end), (if .important then 0 else 1 end), -.pct)'
+GJ() { jq --argjson G "$(cat "$GFILE")" "$@"; } # jq с порядком групп
 now() { date +%s; }
-# язык / language: CB_LANG=ru|en, иначе файл $STATE/lang (install.sh --lang), иначе локаль
+# язык / language: CB_LANG=ru|en, иначе файл $STATE/lang (cstatus lang), иначе локаль
 CB_LANG="${CB_LANG:-$(cat "$STATE/lang" 2>/dev/null)}"
 [ -n "$CB_LANG" ] || case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in ru*) CB_LANG=ru;; *) CB_LANG=en;; esac
 t() { if [ "$CB_LANG" = ru ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; } # t "по-русски" "in English"
@@ -93,29 +101,38 @@ cmd_task() {
       local id="$1" title="$2" pct="${3:-0}" st="${4:-run}" note="${5:-}" cmd="${6:-}" repo
       # репозиторий GitHub, откуда завели задачу — чтобы `run` вливал PR именно там, а не в папке, где его запустили
       repo="$(git remote get-url origin 2>/dev/null | sed -nE 's#^(https://github\.com/|git@github\.com:)([^/]+/[^/.]+)(\.git)?$#\2#p')"
-      jq --arg id "$id" --arg title "$title" --argjson pct "$pct" --arg st "$st" --arg note "$note" --arg cmd "$cmd" --arg repo "$repo" --argjson t "$(now)" '
+      jq --arg id "$id" --arg title "$title" --argjson pct "$pct" --arg st "$st" --arg note "$note" --arg cmd "$cmd" --arg repo "$repo" --arg grp "${CB_GROUP:-}" --argjson t "$(now)" '
         (map(.id) | index($id)) as $i
         | (([$pct, 100] | min) as $m | [0, $m] | max) as $p
-        | ({id: $id, title: $title, pct: $p, state: $st, note: $note, updated: $t} + (if $cmd != "" then {cmd: $cmd} else {} end) + (if $repo != "" then {repo: $repo} else {} end)) as $n
+        | ({id: $id, title: $title, pct: $p, state: $st, note: $note, updated: $t} + (if $cmd != "" then {cmd: $cmd} else {} end) + (if $repo != "" then {repo: $repo} else {} end) + (if $grp != "" then {group: $grp} else {} end)) as $n
         | if $i == null then . + [$n] else .[$i] = (.[$i] + $n) end' "$BOARD" | atomic "$BOARD" ;;
-    done) jq --arg id "$1" --argjson t "$(now)" 'map(if .id == $id then .pct = 100 | .state = "done" | .updated = $t else . end)' "$BOARD" | atomic "$BOARD" ;;
+    done) # cstatus task done ID ["итоговая заметка"] — заметка заменяет старую (иначе висит «ждёт мержа»)
+      jq --arg id "$1" --arg note "${2:-}" --argjson t "$(now)" 'map(if .id == $id then .pct = 100 | .state = "done" | .updated = $t | (if $note != "" then .note = $note else . end) else . end)' "$BOARD" | atomic "$BOARD" ;;
+    important) # метка «важное» ★ (выше в своей группе): cstatus task important ID on|off
+      local v=true; [ "${2:-on}" = off ] && v=false
+      jq --arg id "$1" --argjson v "$v" --argjson t "$(now)" 'map(if .id == $id then .important = $v | .updated = $t else . end)' "$BOARD" | atomic "$BOARD" ;;
+    groups) # cstatus task groups "Frontend,Backend,Ops" — порядок = приоритет; без аргумента — показать
+      if [ -n "${1:-}" ]; then jq -cn --arg s "$1" '$s | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != ""))' | atomic "$GFILE"; fi
+      jq -r 'to_entries[] | "\(.key + 1). \(.value)"' "$GFILE" ;;
+    group) # cstatus task group ID "Группа" — пустое имя убирает группу
+      jq --arg id "$1" --arg g "${2:-}" --argjson t "$(now)" 'map(if .id == $id then (if $g == "" then del(.group) else .group = $g end) | .updated = $t else . end)' "$BOARD" | atomic "$BOARD" ;;
     rm) jq --arg id "$1" 'map(select(.id != $id))' "$BOARD" | atomic "$BOARD" ;;
     clear-done) jq 'map(select(.state != "done"))' "$BOARD" | atomic "$BOARD" ;;
-    ls) jq -r '.[] | "\(.id)\t\(.pct)%\t\(.state)\t\(.title)\t\(.note)"' "$BOARD" ;;
-    *) echo "cstatus task set|done|rm|ls|clear-done" >&2; return 2 ;;
+    ls) GJ -r "$GDEF"' '"$SORTK"' | .[] | "\(.id)\t\(.pct)%\t\(.state)\t[\(.group // "—")]\t\(if .important then "★ " else "" end)\(.title)\t\(.note)"' "$BOARD" ;;
+    *) echo "cstatus task set|done|important|group|groups|rm|ls|clear-done" >&2; return 2 ;;
   esac
 }
 
 
-WAITQ='[.[] | select(.state == "wait")] | sort_by(-.pct)'
+WAITQ='[.[] | select(.state == "wait")] | sort_by(grank, (if .important then 0 else 1 end), -.pct)'
 cmd_mine() { # что ждёт меня — с номерами и командами
-  local n; n=$(jq "$WAITQ | length" "$BOARD")
+  local n; n=$(GJ "$GDEF $WAITQ | length" "$BOARD")
   [ "$n" = 0 ] && { t "Ничего не ждёт тебя 🎉" "Nothing is waiting for you 🎉"; echo; return; }
   echo "$(t "Ждут тебя" "Waiting for you") ($n):"
-  jq -r --arg todo "$(t "что сделать:" "to do:      ")" --arg cmdl "$(t "команда:    " "command:    ")" "$WAITQ"' | to_entries[] | "\n[\(.key + 1)] \(.value.title)  (\(.value.pct)%)\n    \($todo) \(.value.note)" + (if .value.cmd then "\n    \($cmdl) \(.value.cmd)" else "" end)' "$BOARD"
+  GJ -r --arg todo "$(t "что сделать:" "to do:      ")" --arg cmdl "$(t "команда:    " "command:    ")" "$GDEF $WAITQ"' | to_entries[] | "\n[\(.key + 1)] \(if .value.group then "[" + .value.group + "] " else "" end)\(.value.title)  (\(.value.pct)%)\n    \($todo) \(.value.note)" + (if .value.cmd then "\n    \($cmdl) \(.value.cmd)" else "" end)' "$BOARD"
   echo; t "cstatus copy N — команду в буфер · cstatus run N — выполнить · cstatus close N — отметить готовым" "cstatus copy N — copy command · cstatus run N — run it · cstatus close N — mark done"; echo
 }
-pick() { jq -r --argjson i "$1" "$WAITQ"' | .[$i - 1] // empty | .'"$2"' // empty' "$BOARD"; }
+pick() { GJ -r --argjson i "$1" "$GDEF $WAITQ"' | .[$i - 1] // empty | .'"$2"' // empty' "$BOARD"; }
 cmd_copy() {
   local c; c="$(pick "${1:?N}" cmd)"; [ -n "$c" ] || c="$(pick "$1" note)"
   [ -n "$c" ] || { echo "$(t "нет задачи" "no task") [$1]"; return 1; }
@@ -215,16 +232,33 @@ render_board() {
   H "$(t "МОИ ЗАДАЧИ" "MY TASKS")"; printf ' %s— %s %s%s\n' "$(C d)" "$(t всего total)" "$n" "$(C)"
   printf ' %s%s%s\n' "$(C d)" "$(t "◐ ждёт тебя [номер для терминала: cstatus mine]   ▶ в работе   ✖ стоит   ✔ готово" "◐ waiting for you [number: cstatus mine]   ▶ in progress   ✖ blocked   ✔ done")" "$(C)"
   [ "$n" = 0 ] && { printf ' %s%s%s\n' "$(C d)" "$(t "пока пусто" "empty")" "$(C)"; return; }
-  local num=0 max="${CB_MAX_TASKS:-8}"
-  { jq -r 'sort_by(if .state=="wait" then 0 elif .state=="block" then 1 elif .state=="run" then 2 else 3 end, -.pct) | .[] | select(.state != "done" or .updated > (now - 86400)) | [.state, .pct, .title, .note, .updated] | map(tostring) | join("\u001f")' "$BOARD" | head -n "$max" |
-  while IFS=$'\x1f' read -r st pct title note upd; do
+  local num=0 max="${CB_MAX_TASKS:-8}" off="${CB_TASK_OFFSET:-0}"
+  # вторая колонка (render --tasks2): нумерация «ждёт тебя» продолжается с первой
+  [ "$off" -gt 0 ] && num=$(GJ --argjson o "$off" "$GDEF"' ['"$SORTK"' | .[] | select(.state != "done" or .updated > (now - 86400))][:$o] | map(select(.state=="wait")) | length' "$BOARD")
+  local pg="__none__" # предыдущая группа — заголовок печатаем при смене; без групп вообще — без заголовков
+  jq -e 'any(.[]; (.group // "") != "")' "$BOARD" >/dev/null || pg=""
+  { GJ -r "$GDEF"' '"$SORTK"' | .[] | select(.state != "done" or .updated > (now - 86400)) | [.state, .pct, ((if .important then "★ " else "" end) + .title), .note, .updated, (.group // "")] | map(tostring) | join("\u001f")' "$BOARD" | tail -n +$((off + 1)) | head -n "$max" |
+  while IFS=$'\x1f' read -r st pct title note upd grp; do
     local ic col what
+    if [ "$grp" != "$pg" ]; then pg="$grp"; printf ' %s▌ %s%s\n' "$(C c)" "$(esc <<<"${grp:-$(t "Прочее" "Other")}")" "$(C)"; fi
     [ "$st" = wait ] && num=$((num + 1))
     case "$st" in done) ic="✔"; col=d; what="$(t готово done)";; wait) ic="◐"; col=y; what="$(t "нужно от тебя" "needs you")";; block) ic="✖"; col=r; what="$(t стоит blocked)";; *) ic="▶"; col=g; what="$(t сейчас now)";; esac
     SP 10; printf ' %s%s %s%s%s\n' "$(C $col)" "$ic" "$( [ "$st" = wait ] && printf '[%s] ' "$num")" "$(esc <<<"${title:0:66}")" "$(C)"
     printf '   %s%s%s %3s%%  %s%s:%s %s\n' "$(C $col)" "$(bar "$pct" 24)" "$(C)" "$pct" "$(C d)" "$what" "$(C)" "$(esc <<<"${note:0:40}")"
   done; }
-  more "$n" "$max"
+  if [ -n "${CB_SPLIT:-}" ]; then # первая колонка: сколько показали — для второй
+    echo $(( max < n ? max : n )) >"$STATE/board-shown"
+    [ "$n" -gt "$max" ] && printf ' %s→ %s %s %s%s
+' "$(C y)" "$(t "ещё" "+")" $((n - max)) "$(t "— в колонке справа" "in the right column")" "$(C)"
+  else more "$n" $((off + max)); fi
+}
+render_tasks2() { # вторая колонка задач: продолжение первой
+  local shown n; shown=$(cat "$STATE/board-shown" 2>/dev/null || echo 0)
+  n=$(jq '[.[] | select(.state != "done" or .updated > (now - 86400))] | length' "$BOARD")
+  printf '${alignc}${font Ubuntu:size=14:bold}%s${font}\n${alignc}${color 888888}%s %s%s${color}\n' "$(t "ЗАДАЧИ · ПРОДОЛЖЕНИЕ" "TASKS · CONTINUED")" "$(t "с" "from")" "$((shown + 1))" "$(t " из" " of") $n"
+  HR
+  if [ "$shown" -ge "$n" ]; then printf '${voffset 10} %s%s%s\n' "$(C d)" "$(t "всё влезло в первую колонку" "everything fits in the first column")" "$(C)"; return; fi
+  CB_TASK_OFFSET=$shown CB_MAX_TASKS=$(( (${CB_HEIGHT:-1000} - 120) / 49 )) render_board | sed '1,2d'
 }
 
 render_sessions() {
@@ -312,6 +346,9 @@ cmd_cheat() { # шпаргалка команд — отдельная пане�
   row "   … run|wait|done|block" "$(t "статус после процента" "state after the percent")"
   row "cstatus task done ID" "$(t "готово (скроется через сутки)" "done (hidden after 24h)")"
   row "cstatus task rm ID" "$(t удалить delete)"
+  row "cstatus task group ID \"G\"" "$(t "группа задачи (\"\" — убрать)" "task group (\"\" removes)")"
+  row "cstatus task groups \"A,B\"" "$(t "порядок групп = приоритет" "group order = priority")"
+  row "cstatus task important ID" "$(t "★ выше в группе (off — снять)" "★ first in group (off to unset)")"
   row "cstatus task clear-done" "$(t "убрать все готовые" "remove all done")"
   HR; H "$(t ОБСЛУЖИВАНИЕ MAINTENANCE)"; echo
   row "cstatus gc" "$(t "убрать сессии старше 12 ч" "drop sessions idle > 12h")"
@@ -322,7 +359,7 @@ cmd_cheat() { # шпаргалка команд — отдельная пане�
 
 glyphs() { # Ubuntu Mono (как в панели крипты) без ●○▶◐⚠✔✖⚙◆→ — эти символы рисуем DejaVu
   case " $* " in *" --plain "*) cat; return;; esac
-  sed 's/\([●○▶◐⚠✔✖⚙◆→⋯]\)/${font DejaVu Sans Mono:size=11}\1${font}/g'
+  sed 's/\([●○▶◐⚠✔✖⚙◆→⋯★]\)/${font DejaVu Sans Mono:size=11}\1${font}/g'
 }
 cmd_render() {
   [ "${1:-}" = "--plain" ] && { PLAIN=1; : "${CB_MAX_TASKS:=999}" "${CB_MAX_SESSIONS:=999}" "${CB_MAX_AGENTS:=999}"; } # в терминале — всё
@@ -334,7 +371,7 @@ cmd_render() {
   tail_out="$(HR; render_sessions; HR; render_agents)"
   used=$(px <<<"$tail_out")
   CB_MAX_TASKS=$(( (${CB_HEIGHT:-1300} - used - 190) / 49 )); [ "$CB_MAX_TASKS" -lt 3 ] && CB_MAX_TASKS=3
-  HR; render_board; printf '%s\n' "$tail_out"
+  HR; CB_SPLIT="${CB_SPLIT:-}" render_board; printf '%s\n' "$tail_out"
 }
 px() { # оценка высоты conky-вывода: ~20 px строка + voffset'ы
   local t; t="$(cat)"; echo $(( $(grep -c '' <<<"$t") * 18 + $(grep -o 'voffset [0-9]*' <<<"$t" | awk '{s+=$2} END{print s+0}') ))
@@ -343,7 +380,7 @@ px() { # оценка высоты conky-вывода: ~20 px строка + vof
 case "${1:-render}" in
   hook) cmd_hook ;;
   task) shift; cmd_task "$@" ;;
-  render) shift; cmd_render "$@" | glyphs "$@" ;;
+  render) shift; if [ "${1:-}" = "--tasks2" ]; then shift; render_tasks2 | glyphs; else cmd_render "$@" | glyphs "$@"; fi ;;
   cheat|help) shift; cmd_cheat "$@" | glyphs "$@" ;;
   gc) cmd_gc ;;
   mine|my|ждёт) cmd_mine ;;
@@ -351,5 +388,5 @@ case "${1:-render}" in
   copy) shift; cmd_copy "$@" ;;
   run) shift; cmd_run "$@" ;;
   close) shift; cmd_close "$@" ;;
-  *) sed -n '2,8p' "$0"; exit 2 ;;
+  *) sed -n '2,12p' "$0"; exit 2 ;;
 esac
