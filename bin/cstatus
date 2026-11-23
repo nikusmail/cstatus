@@ -235,7 +235,8 @@ render_board() {
   local num=0 max="${CB_MAX_TASKS:-8}" off="${CB_TASK_OFFSET:-0}"
   # вторая колонка (render --tasks2): нумерация «ждёт тебя» продолжается с первой
   [ "$off" -gt 0 ] && num=$(GJ --argjson o "$off" "$GDEF"' ['"$SORTK"' | .[] | select(.state != "done" or .updated > (now - 86400))][:$o] | map(select(.state=="wait")) | length' "$BOARD")
-  local pg="__none__" # предыдущая группа — заголовок печатаем при смене
+  local pg="__none__" # предыдущая группа — заголовок печатаем при смене; без групп вообще — без заголовков
+  jq -e 'any(.[]; (.group // "") != "")' "$BOARD" >/dev/null || pg=""
   { GJ -r "$GDEF"' '"$SORTK"' | .[] | select(.state != "done" or .updated > (now - 86400)) | [.state, .pct, ((if .important then "★ " else "" end) + .title), .note, .updated, (.group // "")] | map(tostring) | join("\u001f")' "$BOARD" | tail -n +$((off + 1)) | head -n "$max" |
   while IFS=$'\x1f' read -r st pct title note upd grp; do
     local ic col what
