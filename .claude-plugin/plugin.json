@@ -1,6 +1,6 @@
 {
   "name": "cstatus",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Desktop task board for Claude Code: your tasks with progress, every Claude session in every terminal, and running agents/workflows — on a conky panel (Linux) or in the terminal. RU/EN.",
   "author": { "name": "nikusmail", "url": "https://github.com/nikusmail" },
   "homepage": "https://github.com/nikusmail/cstatus",
